@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>VR Polarimeter – Cane Sugar</title>
+  <style>
+    body { margin:0; background:#ffffff; color:#eee; font-family:system-ui; }
+    #hud { position:fixed; top:12px; left:12px; background:#0008; padding:10px; border-radius:8px; }
+    .row { margin-bottom:6px; }
+    input[type=range] { width:200px; }
+    canvas.graph { border:1px solid #888; margin-top:8px; background:#111; }
+    button { cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div class="row">Length l (dm): <input id="length" type="range" min="1" max="20" step="1" value="10"> <span id="lengthVal">1.0</span> m</div>
+    <div class="row">Conc c (g/mL): <input id="conc" type="range" min="0" max="0.5" step="0.01" value="0.10"> <span id="concVal">0.10</span></div>
+    <div class="row">Specific rot [α] (deg): <input id="alphaspec" type="range" min="40" max="80" step="0.5" value="66.5"> <span id="alphaspecVal">66.5</span></div>
+    <div class="row">Analyzer θ (deg): <span id="thetaVal">0.0</span></div>
+    <div class="row">Observed α (deg): <span id="alphaObs">0.0</span></div>
+    <div class="row">Computed [α] (deg): <span id="alphaSpecCalc">0.0</span></div>
+    <div class="row">Intensity I/I₀: <span id="intensityVal">1.00</span></div>
+    <div class="row">
+      <button id="resetButton">Reset analyzer</button>
+      <button id="exportButton">Export Data</button>
+    </div>
+    <canvas id="graph" class="graph" width="280" height="140"></canvas>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three/build/three.module.js';
+    import { VRButton } from 'https://unpkg.com/three/examples/jsm/webxr/VRButton.js';
+
+    // Renderer & scene
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    document.body.appendChild(VRButton.createButton(renderer));
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111);
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.6, 3);
+
+    // Lighting & floor
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x222244, 0.8);
+    scene.add(hemi);
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(10, 10),
+      new THREE.MeshStandardMaterial({ color: 0x333333, side: THREE.DoubleSide })
+    );
+    floor.rotation.x = -Math.PI/2;
+    scene.add(floor);
+
+    // Polarimeter group
+    const group = new THREE.Group();
+    scene.add(group);
+
+    // Source
+    const source = new THREE.Mesh(
+      new THREE.SphereGeometry(0.05, 16, 16),
+      new THREE.MeshStandardMaterial({ emissive: 0xffbb66, color: 0x222222 })
+    );
+    source.position.set(-1.5, 1.2, 0);
+    group.add(source);
+
+    // Polarizer (fixed axis = 0°)
+    const polarizer = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.15, 0.15, 0.02, 32),
+      new THREE.MeshStandardMaterial({ color: 0x2266aa, metalness: 0.1, roughness: 0.8 })
+    );
+    polarizer.rotation.z = Math.PI/2;
+    polarizer.position.set(-1.0, 1.2, 0);
+    group.add(polarizer);
+
+    // Tube (transparent)
+    const tube = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.07, 1.0, 32),
+      new THREE.MeshPhysicalMaterial({
+        color: 0x88ccee, transparent: true, opacity: 0.2,
+        roughness: 0.1, transmission: 0.9, thickness: 0.2
+      })
+    );
+    tube.position.set(0, 1.2, 0);
+    group.add(tube);
+
+    // Analyzer (rotatable)
+    const analyzer = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.15, 0.15, 0.02, 32),
+      new THREE.MeshStandardMaterial({ color: 0xaa6622, metalness: 0.1, roughness: 0.8 })
+    );
+    analyzer.rotation.z = Math.PI/2;
+    analyzer.position.set(1.0, 1.2, 0);
+    group.add(analyzer);
+
+    // Detector visualization
+    const detector = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.3, 0.3),
+      new THREE.MeshStandardMaterial({ color: 0x111111, emissive: 0x000000 })
+    );
+    detector.position.set(1.5, 1.2, 0);
+    group.add(detector);
+
+    // Beam visualization (from source through elements)
+    const beamMaterial = new THREE.MeshBasicMaterial({ color: 0xffffaa, transparent:true, opacity:0.5 });
+    const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.02,0.02,3,16), beamMaterial);
+    beam.rotation.z = Math.PI/2;
+    beam.position.set(0,1.2,0);
+    group.add(beam);
+
+    // HUD elements
+    const lengthSlider = document.getElementById('length');
+    const concSlider = document.getElementById('conc');
+    const alphaSpecSlider = document.getElementById('alphaspec');
+    const lengthVal = document.getElementById('lengthVal');
+    const concVal = document.getElementById('concVal');
+    const alphaSpecVal = document.getElementById('alphaspecVal');
+    const thetaVal = document.getElementById('thetaVal');
+    const alphaObs = document.getElementById('alphaObs');
+    const alphaSpecCalc = document.getElementById('alphaSpecCalc');
+    const intensityVal = document.getElementById('intensityVal');
+    const resetButton = document.getElementById('resetButton');
+    const exportButton = document.getElementById('exportButton');
+    const graphCanvas = document.getElementById('graph');
+    const gctx = graphCanvas.getContext('2d');
+
+    // Simulation state
+    let analyzerDeg = 0; // analyzer angle θ
+    let alphaDeg = 0;    // observed rotation α
+    let dataPoints = []; // {theta, intensity, l_dm, c_gml, alphaSpec}
+
+    // Initialize + update params
+    function updateParams() {
+      const l_dm = parseFloat(lengthSlider.value);
+      const c_gml = parseFloat(concSlider.value);
+      const alphaSpec = parseFloat(alphaSpecSlider.value);
+
+      // Display: slider l is in dm; show meters for intuition
+      lengthVal.textContent = (l_dm / 10).toFixed(1);
+      concVal.textContent = c_gml.toFixed(2);
+      alphaSpecVal.textContent = alphaSpec.toFixed(1);
+
+      // Observed rotation α = [α] * l * c + noise
+      const noise = (Math.random() - 0.5) * 0.2; // ±0.1° noise
+      alphaDeg = alphaSpec * l_dm * c_gml + noise;
+      alphaObs.textContent = alphaDeg.toFixed(2);
+
+      // Back-computed specific rotation
+      const denominator = (l_dm * c_gml);
+      const calcSpec = denominator > 0 ? (alphaDeg / denominator) : 0;
+      alphaSpecCalc.textContent = calcSpec.toFixed(2);
+
+      // Visual: scale tube length to l_dm (baseline 1 dm)
+      tube.scale.y = l_dm / 10;
+    }
+
+    updateParams();
+
+    // Malus' law intensity with rotation
+    function computeIntensity() {
+      const theta = THREE.MathUtils.degToRad(analyzerDeg);
+      const alpha = THREE.MathUtils.degToRad(alphaDeg);
+      const I0 = 1.0;
+      const I = I0 * Math.cos(theta - alpha) ** 2;
+      return Math.max(0, Math.min(1, I));
+    }
+
+    // Mouse drag rotation
+    let dragging = false, lastX = 0;
+    renderer.domElement.addEventListener('mousedown', (e) => { dragging = true; lastX = e.clientX; });
+    window.addEventListener('mouseup', () => dragging = false);
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX; lastX = e.clientX;
+      analyzerDeg = (analyzerDeg + dx * 0.3) % 360;
+      analyzer.rotation.y = THREE.MathUtils.degToRad(analyzerDeg);
+      thetaVal.textContent = analyzerDeg.toFixed(1);
+    });
+
+    resetButton.addEventListener('click', () => {
+      analyzerDeg = 0;
+      analyzer.rotation.y = 0;
+      thetaVal.textContent = analyzerDeg.toFixed(1);
+    });
+
+    lengthSlider.addEventListener('input', updateParams);
+    concSlider.addEventListener('input', updateParams);
+    alphaSpecSlider.addEventListener('input', updateParams);
+
+    // Graph utilities
+    function drawGraph() {
+      const w = graphCanvas.width;
+      const h = graphCanvas.height;
+      gctx.clearRect(0,0,w,h);
+
+      // Axes
+      gctx.strokeStyle = '#ccc';
+      gctx.lineWidth = 1;
+      // X-axis: θ (0–360)
+      gctx.beginPath();
+      gctx.moveTo(30, h-20);
+      gctx.lineTo(w-10, h-20);
+      gctx.stroke();
+      // Y-axis: I (0–1)
+      gctx.beginPath();
+      gctx.moveTo(30, 10);
+      gctx.lineTo(30, h-20);
+      gctx.stroke();
+
+      // Labels
+      gctx.fillStyle = '#ddd';
+      gctx.font = '10px system-ui';
+      gctx.fillText('θ (deg)', w-55, h-8);
+      gctx.fillText('I/I0', 5, 20);
+
+      // Grid lines
+      gctx.strokeStyle = '#333';
+      for (let t=0; t<=360; t+=60) {
+        const x = mapThetaToX(t, w);
+        gctx.beginPath();
+        gctx.moveTo(x, 10);
+        gctx.lineTo(x, h-20);
+        gctx.stroke();
+        gctx.fillText(String(t), x-8, h-8);
+      }
+      for (let I=0; I<=1.0; I+=0.25) {
+        const y = mapIntensityToY(I, h);
+        gctx.beginPath();
+        gctx.moveTo(30, y);
+        gctx.lineTo(w-10, y);
+        gctx.stroke();
+        gctx.fillText(I.toFixed(2), 5, y+3);
+      }
+
+      // Plot
+      if (dataPoints.length > 1) {
+        gctx.strokeStyle = '#66ccff';
+        gctx.lineWidth = 2;
+        gctx.beginPath();
+        for (let i=0; i<dataPoints.length; i++) {
+          const dp = dataPoints[i];
+          const x = mapThetaToX((dp.theta+360)%360, w);
+          const y = mapIntensityToY(dp.intensity, h);
+          if (i === 0) gctx.moveTo(x, y);
+          else gctx.lineTo(x, y);
+        }
+        gctx.stroke();
+      }
+    }
+
+    function mapThetaToX(theta, w) {
+      const left = 30, right = w-10;
+      return left + (theta/360) * (right-left);
+    }
+
+    function mapIntensityToY(I, h) {
+      const top = 10, bottom = h-20;
+      return bottom - I * (bottom-top);
+    }
+
+    // Export CSV
+    exportButton.addEventListener('click', () => {
+      if (dataPoints.length === 0) return;
+      const header = 'theta_deg,intensity,l_dm,c_gml,alphaSpec_deg\n';
+      const rows = dataPoints.map(dp => [
+        dp.theta.toFixed(3),
+        dp.intensity.toFixed(4),
+        dp.l_dm.toFixed(3),
+        dp.c_gml.toFixed(3),
+        dp.alphaSpec.toFixed(2)
+      ].join(','));
+      const csv = header + rows.join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
+      a.download = `polarimeter_data_${timestamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+
+    // Animate
+    function renderLoop() {
+      const I = computeIntensity();
+      intensityVal.textContent = I.toFixed(2);
+
+      // Detector emissive brightness mapping
+      const base = 0x11;
+      const span = 0xee;
+      const brightness = Math.max(0x00, Math.min(0xff, Math.floor(base + I * span)));
+      const hex = (brightness << 16) | (brightness << 8) | brightness;
+      detector.material.emissive.setHex(hex);
+
+      // Log data point
+      const l_dm = parseFloat(lengthSlider.value);
+      const c_gml = parseFloat(concSlider.value);
+      const alphaSpec = parseFloat(alphaSpecSlider.value);
+      dataPoints.push({
+        theta: analyzerDeg,
+        intensity: I,
+        l_dm,
+        c_gml,
+        alphaSpec
+      });
+      // Keep array size reasonable
+      if (dataPoints.length > 1000) dataPoints.splice(0, dataPoints.length - 1000);
+
+      // Draw graph
+      drawGraph();
+
+      renderer.render(scene, camera);
+    }
+    renderer.setAnimationLoop(renderLoop);
+
+    // Resize
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+    });
+  </script>
+</body>
+</html>
